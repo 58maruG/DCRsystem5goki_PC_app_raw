@@ -5,8 +5,6 @@ import datetime
 import os
 import time
 import json
-import queue
-import threading
 from ultralytics import YOLO
 from ultralytics.utils import IterableSimpleNamespace, YAML
 from ultralytics.utils.checks import check_yaml
@@ -15,34 +13,14 @@ from ultralytics.trackers.byte_tracker import BYTETracker
 import log_config
 log = log_config.get_logger("yolo")
 
-# get_target_info はフレームごとに呼ばれるため、初回ロード時のみJSONを読む
+# get_target_info はフレームごとに呼ばれるため、初回ロード時のみログを出す
 _logged_hsv_paths: set[str] = set()
-_hsv_config_cache: dict[str, dict] = {}
 
 # ================================================
 # モデル・入力設定
 # ================================================
 USE_CROP          = False
 CENTER_THRESHOLD_X = 100
-
-# ================================================
-# 推論ゲート（中心帯）設定
-# ================================================
-# YOLO推論ゲートの「左右2本の縦線」の、ROI中心からの距離【絶対ピクセル・カメラ別】。
-#   左線 x = w/2 - half / 右線 x = w/2 + half（w は各カメラのROI幅 = pfsのWidth）。
-#   この2本が「両方とも」HSVマスク(最大ブロブ)に被る間だけ推論する
-#   （＝サクランボが帯を跨いで2本を内部に含むとき）。GUIにはこの2本を縦線で表示する。
-#   ※ ROI幅がカメラごとに異なる（cam_pfs参照）。割合だと線間隔・推論タイミングがカメラ間で
-#     ずれるため、絶対pxでカメラ別に持つ。GUIの縦線を見て個別に調整する。
-#   2本を近づけたい（跨ぎやすく＝推論が始まりやすい）→ 値を小さく / 遠ざけたい → 大きく。
-#   初期値は従来比率(ROI幅×0.1)相当。実機の見え方に合わせて詰めること。
-BAND_HALF_PX = {
-    'cam_top':     64,   # ROI幅 640
-    'cam_under':   64,   # ROI幅 640
-    'cam_inside':  56,   # ROI幅 560
-    'cam_outside': 50,   # ROI幅 500
-}
-DEFAULT_BAND_HALF_PX = 56   # 上記に無いカメラ用のフォールバック
 
 #MODEL_PATH = "Trained_Models/v2_11s.pt"
 MODEL_PATH   = "Trained_Models/v4_11s.pt"
@@ -60,7 +38,7 @@ STRICT_THRESHOLDS = {
     "stemcrack":    0.8,
     "crack":        0.8,
     "birddamage":   0.8,
-    "twin":         0.9,
+    "twin":         0.8,
     "blacktwin":    0.9,
     "malformation": 0.9,
     "unripe":       0.9,
@@ -145,7 +123,6 @@ class YoloResult:
         self.frame_dropped      = None   # この個体の通過中にドロップしたフレーム数（全カメラ合計）
         self.hsv_pass           = None   # YOLO検出が1度でもあったか（1=あり/0=なし）
         self.hsv_mask_ratio     = None   # HSVマスク面積比の平均（0〜1）
-        self.yolo_no_det_flag   = None   # HSV通過・YOLO無検出フラグ（1=HSV有でYOLO未検出 / 0=正常検出）
         # この個体で検出された各クラスの「最大信頼度」を信頼度降順で並べたリスト。
         #   要素は (label_name, conf_max) のタプル。GUIの複数クラス表示が読む。
         self.class_breakdown    = []
@@ -162,11 +139,11 @@ class OutputLogger:
 
         # 実行ごとのサブフォルダ（IDの重複防止）
         self.run_img_dir = os.path.join(SAVE_DIR_IMG, timestamp)
-        # os.makedirs(self.run_img_dir, exist_ok=True)  # 画像保存一時停止 ← 再開時はコメントを外す
+        os.makedirs(self.run_img_dir, exist_ok=True)
 
         # 学習用画像ディレクトリ（YOLOクラス名別・実行をまたいで蓄積）
         self.valid_cam_names = ('cam_top', 'cam_under', 'cam_inside', 'cam_outside')
-        # os.makedirs(SAVE_DIR_TRAINING, exist_ok=True)  # 画像保存一時停止 ← 再開時はコメントを外す
+        os.makedirs(SAVE_DIR_TRAINING, exist_ok=True)
 
     def write_csv(self, obj_id: int, detections: list, final_label: str) -> None:
         """1個体（1 ID）の検出履歴を多ラベル long 形式で新ロガーへ送る。
@@ -201,15 +178,14 @@ class OutputLogger:
         """学習用の生フレームをYOLOクラス名別ディレクトリに保存する。
         保存先は training_images/<クラス名>/ で、ファイル名は「推論クラス名_撮影時刻_カメラ名」。
         推論できなかった場合（label_name が None / 空 / "None"）はクラス名を NoClass とする。"""
-        # 画像保存一時停止 ← 再開時はコメントを外す
-        # if cam_name in self.valid_cam_names:
-        #     cls     = label_name if label_name and label_name != "None" else "NoClass"
-        #     cls_dir = os.path.join(SAVE_DIR_TRAINING, cls)
-        #     os.makedirs(cls_dir, exist_ok=True)
-        #     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
-        #     filename  = f"{timestamp}_{cls}_{cam_name}.jpg"
-        #     filepath  = os.path.join(cls_dir, filename)
-        #     cv2.imwrite(filepath, frame)
+        if cam_name in self.valid_cam_names:
+            cls     = label_name if label_name and label_name != "None" else "NoClass"
+            cls_dir = os.path.join(SAVE_DIR_TRAINING, cls)
+            os.makedirs(cls_dir, exist_ok=True)
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+            filename  = f"{timestamp}_{cls}_{cam_name}.jpg"
+            filepath  = os.path.join(cls_dir, filename)
+            cv2.imwrite(filepath, frame)
 
     @staticmethod
     def _placeholder_tile(cam_name: str):
@@ -232,23 +208,22 @@ class OutputLogger:
           2. HSVで捉えた学習用の生フレーム          (fallback_frames)
           3. そのカメラの直近フレーム                (last_frames)
           4. グレーの "NO SIGNAL" プレースホルダ"""
-        # 画像保存一時停止 ← 再開時はコメントを外す
-        # cam_order = ['cam_inside', 'cam_outside', 'cam_under', 'cam_top']
-        # tiles = []
-        # for cam in cam_order:
-        #     if frames_dict and cam in frames_dict:
-        #         tiles.append(cv2.resize(frames_dict[cam], (YOLO_IMG_SIZE, YOLO_IMG_SIZE)))
-        #     elif fallback_frames and cam in fallback_frames:
-        #         tiles.append(cv2.resize(fallback_frames[cam], (YOLO_IMG_SIZE, YOLO_IMG_SIZE)))
-        #     elif last_frames and last_frames.get(cam) is not None:
-        #         tiles.append(cv2.resize(last_frames[cam], (YOLO_IMG_SIZE, YOLO_IMG_SIZE)))
-        #     else:
-        #         tiles.append(self._placeholder_tile(cam))
-        # tile      = np.vstack((np.hstack((tiles[0], tiles[1])), np.hstack((tiles[2], tiles[3]))))
-        # timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
-        # filename  = f"id{obj_id:04d}_{label_name}_{timestamp}.jpg"
-        # filepath  = os.path.join(self.run_img_dir, filename)
-        # cv2.imwrite(filepath, tile)
+        cam_order = ['cam_inside', 'cam_outside', 'cam_under', 'cam_top']
+        tiles = []
+        for cam in cam_order:
+            if frames_dict and cam in frames_dict:
+                tiles.append(cv2.resize(frames_dict[cam], (YOLO_IMG_SIZE, YOLO_IMG_SIZE)))
+            elif fallback_frames and cam in fallback_frames:
+                tiles.append(cv2.resize(fallback_frames[cam], (YOLO_IMG_SIZE, YOLO_IMG_SIZE)))
+            elif last_frames and last_frames.get(cam) is not None:
+                tiles.append(cv2.resize(last_frames[cam], (YOLO_IMG_SIZE, YOLO_IMG_SIZE)))
+            else:
+                tiles.append(self._placeholder_tile(cam))
+        tile      = np.vstack((np.hstack((tiles[0], tiles[1])), np.hstack((tiles[2], tiles[3]))))
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+        filename  = f"id{obj_id:04d}_{label_name}_{timestamp}.jpg"
+        filepath  = os.path.join(self.run_img_dir, filename)
+        cv2.imwrite(filepath, tile)
 
 
 # ================================================
@@ -263,22 +238,26 @@ class ImageProcessor:
         # [A] カメラ別JSON（hsv_calibration.py で生成）を優先する ← 現在の設定
         #       hsv_config_{cam_name}.json → hsv_config.json → デフォルト値
         #       の順にフォールバックするので、カメラ別ファイルが無くても動く。
+        #
+        # [B] 全カメラ共通の hsv_config.json のみ使う場合は
+        #       下の「[A] カメラ別優先」ブロックをコメントアウトし、
+        #       「[B] 共通JSONのみ」ブロックのコメントを外す。
         # ──────────────────────────────────────────────────────────────────
 
-        # カメラ別JSON
+        # [A] カメラ別JSON優先（キャリブレーション済みの推奨設定）
         search_paths = []
         if cam_name:
             search_paths.append(os.path.join("json", f"hsv_config_{cam_name}.json"))
+        #search_paths.append(os.path.join("json", "hsv_common_config.json"))
+
+        # [B] 共通JSONのみ使う場合はこちらをコメントインし、[A] ブロックをコメントアウト
+        #search_paths = [os.path.join("json", "hsv_common_config.json")]
 
         cfg = None
         for path in search_paths:
-            if path in _hsv_config_cache:
-                cfg = _hsv_config_cache[path]
-                break
             if os.path.exists(path):
                 with open(path, 'r') as f:
                     cfg = json.load(f)
-                _hsv_config_cache[path] = cfg
                 if path not in _logged_hsv_paths:
                     log.info("HSV設定を読み込みました: %s", path)
                     _logged_hsv_paths.add(path)
@@ -313,8 +292,7 @@ class ImageProcessor:
         if (s[0] <= 5) or (s[1] <= 5) or ((s[0] + s[2]) >= (w - 5)) or ((s[1] + s[3]) >= (h - 5)):
             return None
         return {'mx': int(centroids[max_index][0]), 'my': int(centroids[max_index][1]),
-                'area': s[4], 'stat': s,
-                'labels': labels, 'max_index': int(max_index)}
+                'area': s[4], 'stat': s}
 
     @staticmethod
     def dynamic_crop(frame, target: dict):
@@ -329,21 +307,6 @@ class ImageProcessor:
         if x2 == w: x1 = max(0, w - size)
         if y2 == h: y1 = max(0, h - size)
         return frame[y1:y2, x1:x2]
-
-    @staticmethod
-    def draw_inference_band(frame, cam_name, native_width, color=(0, 200, 255), thickness=2):
-        """推論ゲートの左右2本の縦線を frame に描画する（GUI可視化用）。
-        ゲートは native_width(=ROI幅) 上の絶対px(BAND_HALF_PX)で判定するため、
-        表示フレームが640へリサイズ済みでも比率に直して正しい位置へ描く。
-        color は frame の色空間に合わせる（RGB画像へ描くなら RGB 並びで渡す）。"""
-        h, w = frame.shape[:2]
-        half = BAND_HALF_PX.get(cam_name, DEFAULT_BAND_HALF_PX)
-        frac = (half / native_width) if native_width else 0.0
-        xl = min(max(int(round((0.5 - frac) * w)), 0), w - 1)
-        xr = min(max(int(round((0.5 + frac) * w)), 0), w - 1)
-        cv2.line(frame, (xl, 0), (xl, h - 1), color, thickness)
-        cv2.line(frame, (xr, 0), (xr, h - 1), color, thickness)
-        return frame
 
 
 # ================================================
@@ -373,17 +336,7 @@ class YoloDetector:
         self.last_frame_per_cam = {c: None for c in CAM_NAMES}
 
         # 現在追跡中の1個体の状態（_reset_object で初期化）
-        self._obj_generation = 0   # _reset_object のたびに増加。古い推論結果を破棄する目印
         self._reset_object()
-
-        # ── 推論ワーカースレッド ──────────────────────────────────────
-        # model.predict だけを別スレッドで実行し、GUIスレッドのブロックを防ぐ。
-        # キューのサイズを小さく保ち、古いフレームは捨てて遅延蓄積を防ぐ。
-        self._infer_queue    = queue.Queue(maxsize=4)
-        self._result_queues  = {cam: queue.Queue(maxsize=2) for cam in CAM_NAMES}
-        self._infer_running  = True
-        self._infer_thread   = threading.Thread(target=self._inference_worker, daemon=True)
-        self._infer_thread.start()
 
     def model_precision(self) -> str:
         """ロード済みモデルの実際の重み精度を返す（startup ログ用）。
@@ -400,7 +353,6 @@ class YoloDetector:
     # 個体状態のリセット／更新ヘルパー
     # ------------------------------------------------------
     def _reset_object(self) -> None:
-        self._obj_generation   += 1       # 古い推論結果を無効化するための世代番号
         self.obj_active         = False   # 追跡中の個体があるか
         self.obj_first_seen     = None    # 現個体が最初に見えた時刻
         self.obj_last_seen      = None    # 現個体が最後に見えた時刻
@@ -454,22 +406,17 @@ class YoloDetector:
                             self.logger.write_training_image(cam, d['frame'], d['label'])
                     self.current_cherry_id += 1
                 else:
-                    # 本物だがYOLO未検出 → 学習用保存 + cycle ログに yolo_no_det_flag=1 で記録
+                    # 本物だがYOLO未検出 → 各カメラ NoClass として学習用のみ保存
                     for cam, d in self.obj_cam_train.items():
                         self.logger.write_training_image(cam, d['frame'], d['label'])
-                    no_det = YoloResult(self.current_cherry_id, "None", 0.0, "")
-                    self._attach_cycle_stats(no_det, yolo_no_det=1)
-                    result = no_det
                     self.current_cherry_id += 1
             # confirmed でない（短すぎる blip）→ 破棄し、IDは進めない
         self._reset_object()
         return result
 
-    def _attach_cycle_stats(self, best: YoloResult, yolo_no_det: int = 0) -> None:
+    def _attach_cycle_stats(self, best: YoloResult) -> None:
         """確定個体の集計（検出数・確定クラスの信頼度統計・推論時間平均）を best に付与する。
-        main 側の process_final_result がこれを読んで dcr.cycle(...) に渡す。
-        yolo_no_det=1 のときは HSV通過・YOLO無検出ケース。"""
-        best.yolo_no_det_flag = yolo_no_det
+        main 側の process_final_result がこれを読んで dcr.cycle(...) に渡す。"""
         confs = [d.confidence for d in self.obj_detections if d.label_name == best.label_name]
         best.num_detections = len([d for d in self.obj_detections if d.label_name != "None"])
         if confs:
@@ -518,9 +465,11 @@ class YoloDetector:
     def _resolve_best_result(self, detections: list) -> YoloResult | None:
         """
         全カメラの履歴から最終判定を決定する。
-        受け取る detections は蓄積時点で STRICT_THRESHOLDS 済み。
 
-        (1) 「複数カメラ一致による確定ルール」を判定する。
+        前段: 閾値ありクラスは strict 閾値未満の検出を無効化（無かった扱い）にする。
+            これにより以降の(1)〜(2)の全段階で閾値が尊重される。有効な検出が
+            1つも残らなければ、検出信頼度が最大のクラスで確定する（閾値未満でも確定）。
+        (1) 「複数カメラ一致による確定ルール」を判定する。閾値以上の検出が
             MULTI_CAM_MIN 台以上で成立すれば、そのクラスを確定する。
         (2) 成立しなければフォールバックで決める。優先順は
             「不良(未熟含む) > 健全」。ただし残りが未熟と健全のみの場合は
@@ -529,7 +478,24 @@ class YoloDetector:
         if not detections:
             return None
 
+        # --- 前段: 閾値ありクラスは閾値未満の検出を無効化（無かった扱い）---
+        #   閾値なしクラス(カビ等)と健全はそのまま有効（STRICT_THRESHOLDS.get→0.0）。
+        eligible = [
+            d for d in detections
+            if d.label_name != "None"
+            and d.confidence >= STRICT_THRESHOLDS.get(d.label_name, 0.0)
+        ]
+        if not eligible:
+            # 閾値以上の有効な検出が無い場合は、検出信頼度が最大のクラスで確定する
+            #   （閾値未満でも確定。GUI表示では _attach_cycle_stats が確定クラスのみ残す）。
+            valid = [d for d in detections if d.label_name != "None"]
+            if valid:
+                return max(valid, key=lambda x: x.confidence)
+            return max(detections, key=lambda x: x.confidence)
+        detections = eligible
+
         # --- クラスごとに「検出した異なるカメラ数」を集計（同一カメラの複数フレームは1カウント）---
+        #   detections は閾値以上のみ。よってマルチカメラ確定も閾値以上の検出だけを数える。
         cams_per_label: dict[str, set] = {}
         for d in detections:
             cams_per_label.setdefault(d.label_name, set()).add(d.cam_name)
@@ -591,58 +557,71 @@ class YoloDetector:
         #   detections は閾値以上の非空リストなので通常は手前で return される。
         return max(detections, key=lambda x: x.confidence)
 
-    # ------------------------------------------------------
-    # 推論ワーカー（バックグラウンドスレッド）
-    # ------------------------------------------------------
-    def _inference_worker(self) -> None:
-        """model.predict だけを別スレッドで実行し、結果をカメラ別キューへ返す。
-        GUIスレッドのQTimerをブロックしないことが目的。ByteTrackerは含まない。"""
-        while self._infer_running:
-            try:
-                item = self._infer_queue.get(timeout=0.1)
-            except queue.Empty:
-                continue
-            if item is None:
-                break
-            cam_name, img, ctx = item
-            t0 = time.perf_counter()
-            try:
-                results = self.model.predict(img, conf=PREDICT_CONF, verbose=False)
-                det     = results[0].boxes.cpu().numpy()
-            except Exception as e:
-                log.error("推論ワーカー例外: %s", e)
-                continue
-            infer_ms = (time.perf_counter() - t0) * 1000.0
-            try:
-                self._result_queues[cam_name].put_nowait((det, img, infer_ms, ctx))
-            except queue.Full:
-                pass  # 結果キューが満杯なら古い結果が先に消化されるまで破棄
+    def evaluate_frame(self, frame, cam_name: str) -> tuple:
+        target = ImageProcessor.get_target_info(frame, cam_name)
+        found  = target is not None
+        now    = time.monotonic()
 
-    def _apply_inference(self, cam_name: str, det, img, infer_ms: float, ctx: dict):
-        """推論結果をGUIスレッドで適用する（ByteTracker・状態更新・描画）。
-        世代が合わない（個体確定後の残留結果）はスキップして None を返す。"""
-        if ctx.get('generation') != self._obj_generation:
-            return None, YoloResult(self.current_cherry_id, "None", 0.0, cam_name)
+        # --- 出口ヒステリシス: last_seen_time から EMPTY_TIMEOUT_SEC 経過したら現個体を確定 ---
+        # last_seen_time は ByteTrack が有効トラックを確認したときのみ更新されるため、
+        # HSV が一時的に見失っても ByteTrack が追跡継続している間はタイマーが進まない。
+        finalized_result = None
+        if self.obj_active and (now - self.last_seen_time) >= self.EMPTY_TIMEOUT_SEC:
+            finalized_result = self._finalize_object()
 
-        self.obj_infer_ms_sum += infer_ms
+        actual_obj_id = self.current_cherry_id
+
+        # HSV が検出しない かつ セッション非アクティブ → YOLO をスキップ
+        # セッション中（obj_active=True）は HSV が見失っても YOLO を走らせ続け、
+        # ByteTrack のカルマン予測でサクランボを追跡継続できるようにする。
+        if not found and not self.obj_active:
+            output_frame = cv2.resize(frame, (YOLO_IMG_SIZE, YOLO_IMG_SIZE))
+            self._buffer_frame(cam_name, output_frame)
+            return output_frame, YoloResult(actual_obj_id, "None", 0.0, cam_name), finalized_result
+
+        # HSV マスク面積比を積算（cycle ログの hsv_mask_ratio 用）
+        if found:
+            frame_pixels = frame.shape[0] * frame.shape[1]
+            if frame_pixels > 0:
+                self.obj_hsv_area_sum   += target['area'] / frame_pixels
+                self.obj_hsv_area_count += 1
+
+        # 前処理（クロップ・リサイズ）時間を計測
+        _t_pre = time.perf_counter()
+        if found and abs(target['mx'] - frame.shape[1] // 2) < CENTER_THRESHOLD_X:
+            input_img    = ImageProcessor.dynamic_crop(frame, target)
+            center_dist  = abs(target['mx'] - frame.shape[1] // 2)
+        else:
+            input_img    = frame
+            center_dist  = frame.shape[1] // 2
+        input_img_resized = cv2.resize(input_img, (YOLO_IMG_SIZE, YOLO_IMG_SIZE))
+        self.obj_preproc_ms_sum += (time.perf_counter() - _t_pre) * 1000.0
+        self.obj_preproc_count  += 1
+
+        # YOLO 推論（低閾値で検出し ByteTrack へ渡す）+ カメラ別トラッカーで追跡
+        _t_infer = time.perf_counter()
+        results  = self.model.predict(input_img_resized, conf=PREDICT_CONF, verbose=False)
+        det      = results[0].boxes.cpu().numpy()
+        tracks   = self.trackers[cam_name].update(det, input_img_resized)
+        self.obj_infer_ms_sum += (time.perf_counter() - _t_infer) * 1000.0
         self.obj_infer_count  += 1
 
-        t_post = time.perf_counter()
-        tracks = self.trackers[cam_name].update(det, img)
-
-        annotated_frame = img.copy()
-        best_result     = YoloResult(ctx['obj_id'], "None", 0.0, cam_name)
+        # ByteTrack 出力をパース（CONF_THRESHOLD 以上のみラベル採用）
+        _t_post        = time.perf_counter()
+        annotated_frame = input_img_resized.copy()
+        best_result     = YoloResult(actual_obj_id, "None", 0.0, cam_name)
         has_valid_track = False
-        now_ctx         = ctx.get('now', time.monotonic())
 
         for row in tracks:
             x1, y1, x2, y2 = map(int, row[:4])
             conf  = float(row[5])
             cls   = int(row[6])
             label = self.model.names[cls].lower()
+
             if conf < CONF_THRESHOLD:
                 continue
             has_valid_track = True
+
             color      = COLORS.get(label, (0, 255, 0))
             cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), color, 3)
             label_text = f"{label} {conf:.2f}"
@@ -651,148 +630,53 @@ class YoloDetector:
             cv2.rectangle(annotated_frame, (x1, back_y1), (x1 + text_w, y1), color, -1)
             cv2.putText(annotated_frame, label_text, (x1, y1 - 5),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
-            if conf > best_result.confidence:
-                best_result = YoloResult(ctx['obj_id'], label, conf, cam_name)
 
+            if conf > best_result.confidence:
+                best_result = YoloResult(actual_obj_id, label, conf, cam_name)
+
+        # ByteTrack が有効トラックを確認した場合のみセッションタイマーを更新
+        # これにより「HSV がノイズを拾った」だけではセッションが始まらず ID ギャップを防ぐ
         if has_valid_track:
-            self.last_seen_time = now_ctx
-            self.obj_last_seen  = now_ctx
+            self.last_seen_time = now
+            self.obj_last_seen  = now
             if not self.obj_active:
-                self.obj_active     = True
-                self.obj_first_seen = now_ctx
+                self.obj_active    = True
+                self.obj_first_seen = now
                 if self.cameras:
                     for cam in self.cameras:
                         cam.reset_cycle_stats()
 
-        self.obj_postproc_ms_sum += (time.perf_counter() - t_post) * 1000.0
+        self.obj_postproc_ms_sum += (time.perf_counter() - _t_post) * 1000.0
         self.obj_postproc_count  += 1
 
-        # 学習用フレーム保持
-        if ctx['found'] and ctx['area'] >= MIN_TRAINING_AREA:
+        # 学習用フレーム保持（HSV 検出あり・面積が十分な場合のみ）
+        if found and target['area'] >= MIN_TRAINING_AREA:
             entry = self.obj_cam_train.get(cam_name)
             if entry is None:
                 entry = {'min_dist': float('inf'), 'frame': None, 'label': None, 'conf': -1.0}
                 self.obj_cam_train[cam_name] = entry
-            cd = ctx['center_dist']
-            if cd < entry['min_dist']:
-                entry['min_dist'] = cd
-                entry['frame']    = img.copy()
+            if center_dist < entry['min_dist']:
+                entry['min_dist'] = center_dist
+                entry['frame']    = input_img_resized.copy()
             if best_result.label_name != "None" and best_result.confidence > entry['conf']:
                 entry['conf']  = best_result.confidence
                 entry['label'] = best_result.label_name
 
-        # タイル用フレーム + obj_detections への蓄積
+        # タイル用フレーム保持（YOLO検出は priority=2、HSVのみは priority=1）
         if best_result.label_name != "None":
-            if best_result.confidence >= STRICT_THRESHOLDS.get(best_result.label_name, 0.0):
-                self.obj_detections.append(best_result)
-                self.obj_has_detection = True
+            self.obj_detections.append(best_result)
+            self.obj_has_detection = True
             self._update_cam_tile(cam_name, annotated_frame, 2, best_result.confidence)
-        elif ctx['found']:
-            self._update_cam_tile(cam_name, annotated_frame, 1, -ctx['center_dist'])
+        elif found:
+            self._update_cam_tile(cam_name, annotated_frame, 1, -center_dist)
 
         self._buffer_frame(cam_name, annotated_frame)
-        return annotated_frame, best_result
-
-    def evaluate_frame(self, frame, cam_name: str) -> tuple:
-        now = time.monotonic()
-
-        # ── 1. 前フレームの推論結果を消化（GUIスレッド） ──────────────
-        # model.predict はワーカースレッドで完了済み。ByteTracker・状態更新だけここで行う。
-        annotated_frame     = None
-        best_result_applied = None
-        try:
-            det, prev_img, infer_ms, ctx = self._result_queues[cam_name].get_nowait()
-            annotated_frame, best_result_applied = self._apply_inference(
-                cam_name, det, prev_img, infer_ms, ctx)
-        except queue.Empty:
-            pass
-
-        # ── 2. HSV + in_band 判定 ───────────────────────────────────
-        target = ImageProcessor.get_target_info(frame, cam_name)
-        found  = target is not None
-
-        in_band = False
-        if found:
-            w      = frame.shape[1]
-            cx     = w / 2.0
-            half   = BAND_HALF_PX.get(cam_name, DEFAULT_BAND_HALF_PX)
-            xl     = min(max(int(round(cx - half)), 0), w - 1)
-            xr     = min(max(int(round(cx + half)), 0), w - 1)
-            mi     = target['max_index']
-            labs   = target['labels']
-            in_band = bool(np.any(labs[:, xl] == mi)) and bool(np.any(labs[:, xr] == mi))
-
-        # ── 3. 出口ヒステリシス ─────────────────────────────────────
-        finalized_result = None
-        if self.obj_active and (now - self.last_seen_time) >= self.EMPTY_TIMEOUT_SEC:
-            finalized_result = self._finalize_object()
-
-        actual_obj_id = self.current_cherry_id
-
-        # ── 4. 表示フレームの決定 ────────────────────────────────────
-        # 推論結果がまだ届いていない場合は直近バッファを表示する（1フレーム分の遅延は許容）
-        if annotated_frame is None:
-            annotated_frame = self.last_frame_per_cam.get(cam_name)
-            if annotated_frame is None:
-                annotated_frame = cv2.resize(frame, (YOLO_IMG_SIZE, YOLO_IMG_SIZE))
-        best_result = best_result_applied or YoloResult(actual_obj_id, "None", 0.0, cam_name)
-
-        # ── 5. 帯外 → 推論投入なし ──────────────────────────────────
-        if not in_band:
-            raw = cv2.resize(frame, (YOLO_IMG_SIZE, YOLO_IMG_SIZE))
-            self._buffer_frame(cam_name, raw)
-            return annotated_frame, best_result, finalized_result
-
-        # ── 6. HSVマスク面積比の積算 ─────────────────────────────────
-        if found:
-            fp = frame.shape[0] * frame.shape[1]
-            if fp > 0:
-                self.obj_hsv_area_sum   += target['area'] / fp
-                self.obj_hsv_area_count += 1
-
-        # ── 7. 前処理（クロップ・リサイズ） ─────────────────────────
-        _t_pre = time.perf_counter()
-        if found and abs(target['mx'] - frame.shape[1] // 2) < CENTER_THRESHOLD_X:
-            input_img   = ImageProcessor.dynamic_crop(frame, target)
-            center_dist = abs(target['mx'] - frame.shape[1] // 2)
-        else:
-            input_img   = frame
-            center_dist = frame.shape[1] // 2
-        input_img_resized = cv2.resize(input_img, (YOLO_IMG_SIZE, YOLO_IMG_SIZE))
-        self.obj_preproc_ms_sum += (time.perf_counter() - _t_pre) * 1000.0
-        self.obj_preproc_count  += 1
-
-        # ── 8. model.predict をワーカースレッドへ投入 ────────────────
-        # context には状態更新に必要な情報をすべて含める。
-        # generation が一致しない古い結果は _apply_inference で破棄される。
-        ctx = {
-            'generation':  self._obj_generation,
-            'obj_id':      actual_obj_id,
-            'now':         now,
-            'found':       found,
-            'center_dist': center_dist,
-            'area':        target['area'] if found else 0,
-        }
-        try:
-            self._infer_queue.put_nowait((cam_name, input_img_resized.copy(), ctx))
-        except queue.Full:
-            pass  # キュー満杯時はこのフレームをドロップして遅延蓄積を防ぐ
-
-        # 今フレームはワーカーが処理中 → 前回の annotated_frame を返して画面を更新し続ける
         return annotated_frame, best_result, finalized_result
 
     def _buffer_frame(self, cam_name: str, frame) -> None:
         self.last_frame_per_cam[cam_name] = frame
 
     def close(self) -> None:
-        # 推論ワーカースレッドを停止する（None を番兵として送り join する）
-        self._infer_running = False
-        try:
-            self._infer_queue.put_nowait(None)
-        except queue.Full:
-            pass
-        self._infer_thread.join(timeout=2.0)
-
         # 終了時: 追跡中の個体が残っていれば確定して保存する
         if self.obj_active:
             self._finalize_object()
