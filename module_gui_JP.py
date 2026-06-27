@@ -16,70 +16,39 @@ from PySide6.QtGui import QPainter, QColor, QBrush, QPixmap
 MARGIN_X = 10                           # 画面の余白x
 MARGIN_Y = 10                           # 画面の余白y
 
-MARGIN_CAM = MARGIN_X * 0.5             # 余白xの1/2倍
-
 #WINDOW_W, WINDOW_H = 1280, 800          # 1920×1200 拡大/縮小 150%
 #WINDOW_W, WINDOW_H = 1280, 720          # 1920×1080 拡大/縮小 150%
 WINDOW_W, WINDOW_H = 1706, 1066         # 2560×1600 拡大/縮小 150%
 
-# --- カメラ（正方形を維持して縮小。2×2で左上に配置）---
-VIEW_CAM_SIZE_W = 400
-VIEW_CAM_SIZE_H = 400
+VIEW_CAM_SIZE_W = 480
+VIEW_CAM_SIZE_H = 480
 
-# --- アイコン ---
-ICON_SETTING_SIZE = int(WINDOW_W * 0.09) // 10 * 10             # 設定アイコン（左下へ移動・小型化）
-ICON_POWER_SIZE   = int(WINDOW_W * 0.1) // 10 * 10             # 電源アイコン（右上・従来通り）
+#VIEW_CAM_SIZE_W = int(WINDOW_W * 0.34) // 10 * 10               # カメラ表示サイズw (10の倍数に丸める)
+#VIEW_CAM_SIZE_H = (WINDOW_H - MARGIN_Y * 3) / 2                 # カメラ表示サイズh
 
-# --- 右カラム基準（カメラ右端の右側）---
-RIGHT_X = (VIEW_CAM_SIZE_W + MARGIN_X) * 2 + MARGIN_CAM   # 右カラム左端
-RIGHT_W = WINDOW_W - RIGHT_X - MARGIN_X                            # 右カラム幅
+ICON_SETTING_SIZE = int(WINDOW_W * 0.1) // 10 * 10              # 設定アイコンサイズ
+ICON_POWER_SIZE   = int(WINDOW_W * 0.1) // 10 * 10              # 電源アイコンサイズ
 
-# --- クラス表示リスト（横長）---
-LABEL_HISTORY_SIZE_W = RIGHT_W + MARGIN_CAM
-LABEL_HISTORY_SIZE_H = 430
+LABEL_HISTORY_SIZE_W = int(WINDOW_W * 0.3) // 10 * 10           # 履歴ラベルの幅
+LABEL_HISTORY_SIZE_H = int(WINDOW_H * 0.3) // 10 * 10           # 履歴ラベルの高さ
 
-# --- ステータスバー（run / stop / estop / error）---
-LABEL_STATUS_SIZE_W = RIGHT_W + MARGIN_CAM
-LABEL_STATUS_SIZE_H = 64
+LABEL_DAMAGE_SIZE_W = int(WINDOW_W * 0.3) // 10 * 10            # 病害名表示ラベルサイズw
+LABEL_DAMAGE_SIZE_H = int(WINDOW_H * 0.1) // 10 * 10            # 病害名表示ラベルサイズh
 
-# --- 累計カウント統計（右下に配置）---
-LABEL_STATS_SIZE_W = RIGHT_W * 0.6
-LABEL_STATS_SIZE_H = 352
+LABEL_STATS_SIZE_W = LABEL_HISTORY_SIZE_W                        # 統計用表示ラベルサイズw
+LABEL_STATS_SIZE_H = int(WINDOW_H * 0.12) // 10 * 10            # 統計用表示ラベルサイズh
 
 LABEL_MANAGEMENT_SIZE_W = int(WINDOW_W * 0.2) // 10 * 10        # 「システム管理」ラベルサイズw
 LABEL_MANAGEMENT_SIZE_H = int(WINDOW_H * 0.1) // 10 * 10        # 「システム管理」ラベルサイズh
 
-SWITCH_TOGGLE_SIZE_W = int(WINDOW_W * 0.2) // 10 * 10           # トグルスイッチサイズw（従来通り）
+SWITCH_TOGGLE_SIZE_W = int(WINDOW_W * 0.2) // 10 * 10           # トグルスイッチサイズw
 SWITCH_TOGGLE_SIZE_H = SWITCH_TOGGLE_SIZE_W / 2                  # トグルスイッチサイズh
 
 LABEL_TOGGLE_SIZE_W = SWITCH_TOGGLE_SIZE_W                       # トグルスイッチ状態表示ラベルサイズw
 LABEL_TOGGLE_SIZE_H = LABEL_TOGGLE_SIZE_W / 7                    # トグルスイッチ状態表示ラベルサイズh
 
-# --- 左下：モード表示パネル ---
-MODE_PANEL_H = 220                                              # モード表示パネル高さ
-
-
-# ================================================
-# クラス名（YOLOラベル）→ 表示情報マッピング
-#   jp:    日本語表示名
-#   color: クラスリスト（黒背景）上での文字色（黒地で視認できる明るめの色）
-# ================================================
-CLASS_DISPLAY = {
-    "healthy":      {"jp": "健全果",     "color": "#FFFFFF"},
-    "twin":         {"jp": "双子果",     "color": "#FF4D4D"},
-    "unripe":       {"jp": "未熟果",     "color": "#FFFF66"},
-    "mold":         {"jp": "カビ",       "color": "#DB7AE0"},
-    "stemcrack":    {"jp": "果梗裂果",   "color": "#6E9BFF"},
-    "birddamage":   {"jp": "鳥害",       "color": "#6FA8FF"},
-    "malformation": {"jp": "奇形果",     "color": "#FF7A3D"},
-    "crack":        {"jp": "裂果",       "color": "#4FC3F7"},
-    "wilt":         {"jp": "萎凋果",     "color": "#C8956A"},
-    "suturecrack":  {"jp": "縫合線裂果", "color": "#4FD6C7"},
-    "brownrot":     {"jp": "灰星病",     "color": "#C98A5E"},
-    "blacktwin":    {"jp": "黒双子",     "color": "#AEB9C7"},
-    "insect":       {"jp": "虫害",       "color": "#B5D44D"},
-    "kasure":       {"jp": "擦れ果",     "color": "#D4B483"},
-}
+BASE_X = (MARGIN_X + VIEW_CAM_SIZE_W) * 2                        # システム管理エリア基準x
+BASE_Y = MARGIN_Y * 2 + VIEW_CAM_SIZE_H                          # システム管理エリア基準y
 
 # ================================================
 # サブウインドウ レイアウト定数
@@ -108,15 +77,21 @@ qproperty-alignment: 'AlignCenter';
 LABEL_HISTORY_STYLE = """
 font-family: "MS Gothic";
 font-size: 20px; font-weight: bold;
-color: #000000; background-color: #FFFFFF;
-border: 2px solid #000000; border-radius: 5px;
+color: #00FF00; background-color: #000000;
+border: 2px solid #555555; border-radius: 5px;
 qproperty-alignment: 'AlignCenter';
 """
 LABEL_STATS_STYLE = """
 font-family: "MS Gothic";
 font-size: 15px; font-weight: bold;
+color: #00FF00; background-color: #000000;
+border: 2px solid #555555; border-radius: 5px;
+qproperty-alignment: 'AlignCenter';
+"""
+LABEL_DAMAGE_STYLE = """
+font-family: "Meiryo"; font-size: 30px; font-weight: bold;
 color: #000000; background-color: #FFFFFF;
-border: 2px solid #000000; border-radius: 5px;
+border: 1px solid #000000;
 qproperty-alignment: 'AlignCenter';
 """
 LABEL_MANAGEMENT_STYLE = """
@@ -135,38 +110,15 @@ padding: 2px 4px; border-radius: 3px;
 """
 LABEL_MODE_STYLE_PC = """
 font-family: "Meiryo"; font-size: 22px; font-weight: bold;
-color: #1E7A1E; qproperty-alignment: 'AlignLeft | AlignVCenter';
+color: #888888; qproperty-alignment: 'AlignCenter';
 """
 LABEL_MODE_STYLE_STANDALONE = """
 font-family: "Meiryo"; font-size: 22px; font-weight: bold;
-color: #FF8C00; qproperty-alignment: 'AlignLeft | AlignVCenter';
+color: #FF8C00; qproperty-alignment: 'AlignCenter';
 """
 
-# --- 左下：モード表示パネル ---
-LABEL_MODE_PANEL_STYLE = """
-background-color: #F4F4F4; border: 2px solid #999999; border-radius: 8px;
-"""
-LABEL_MODE_TITLE_STYLE = """
-font-family: "Meiryo"; font-size: 18px; font-weight: bold;
-color: #555555; qproperty-alignment: 'AlignLeft | AlignVCenter';
-"""
-LABEL_MODE_CAPTION_STYLE = """
-font-family: "Meiryo"; font-size: 20px; font-weight: bold;
-color: #777777; qproperty-alignment: 'AlignLeft | AlignVCenter';
-"""
-LABEL_MODE_VALUE_STYLE = """
-font-family: "Meiryo"; font-size: 22px; font-weight: bold;
-color: #222222; qproperty-alignment: 'AlignLeft | AlignVCenter';
-"""
-
-# --- ステータスバー（run / stop / estop / error）---
-#   実際の各セルは main 側で HTML 組み立てして強調表示する。
-LABEL_STATUS_STYLE = """
-background-color: #111111; border: 2px solid #555555; border-radius: 5px;
-"""
-
-CAM_NAME_LABEL_W = 120
-CAM_NAME_LABEL_H = 22
+CAM_NAME_LABEL_W = 170
+CAM_NAME_LABEL_H = 28
 
 # --- サブウインドウ ---
 BUTTON_SUB_STYLE = """
@@ -427,9 +379,9 @@ class MainWindowUI(QMainWindow):
 
         # --- カメラ表示エリア ---
         cam_x_left  = MARGIN_X
-        cam_x_right = VIEW_CAM_SIZE_W + MARGIN_X + MARGIN_CAM
+        cam_x_right = VIEW_CAM_SIZE_W + MARGIN_X * 2
         cam_y_upper = MARGIN_Y
-        cam_y_lower = VIEW_CAM_SIZE_H + MARGIN_Y + MARGIN_CAM
+        cam_y_lower = VIEW_CAM_SIZE_H + MARGIN_Y * 2
 
         self.cam_in = QLabel("cam_inside", self)
         self.cam_in.setFixedSize(VIEW_CAM_SIZE_W, VIEW_CAM_SIZE_H)
@@ -473,7 +425,18 @@ class MainWindowUI(QMainWindow):
         self.cam_name_top.setStyleSheet(LABEL_CAM_NAME_STYLE)
         self.cam_name_top.move(cam_x_right + _cn_offset, cam_y_lower + _cn_offset)
 
-        # --- 電源アイコン（右上・従来通り）---
+        # --- 設定アイコンエリア ---
+        setting_x = BASE_X + MARGIN_X
+        setting_y = MARGIN_Y
+
+        pixmap = QPixmap(resource_path("Icon/setting.png"))
+        self.button_setting = ClickableLabel(self)
+        self.button_setting.setFixedSize(ICON_SETTING_SIZE, ICON_SETTING_SIZE)
+        self.button_setting.move(setting_x, setting_y)
+        self.button_setting.setCursor(Qt.PointingHandCursor)
+        resize_smooth_image(pixmap, self.button_setting)
+
+        # --- 電源アイコンエリア ---
         power_x = WINDOW_W - ICON_POWER_SIZE - MARGIN_X
         power_y = MARGIN_Y
 
@@ -484,130 +447,62 @@ class MainWindowUI(QMainWindow):
         self.button_power.setCursor(Qt.PointingHandCursor)
         resize_smooth_image(pixmap, self.button_power)
 
-        # --- クラス表示リスト（横長・右カラム上部）---
-        history_x = RIGHT_X
-        history_y = MARGIN_Y + ICON_POWER_SIZE + MARGIN_Y
+        # --- 判定履歴表示エリア ---
+        history_x = WINDOW_W - LABEL_HISTORY_SIZE_W - MARGIN_X
+        history_y = setting_y + ICON_SETTING_SIZE + MARGIN_Y
 
         self.label_history = QLabel("入力待機中...", self)
         self.label_history.setFixedSize(LABEL_HISTORY_SIZE_W, LABEL_HISTORY_SIZE_H)
         self.label_history.setStyleSheet(LABEL_HISTORY_STYLE)
-        self.label_history.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         self.label_history.move(history_x, history_y)
 
-        # --- ステータスバー（run / stop / estop / error）---
-        status_x = RIGHT_X
-        status_y = history_y + LABEL_HISTORY_SIZE_H + MARGIN_Y
-
-        self.label_status = QLabel("", self)
-        self.label_status.setFixedSize(LABEL_STATUS_SIZE_W, LABEL_STATUS_SIZE_H)
-        self.label_status.setStyleSheet(LABEL_STATUS_STYLE)
-        self.label_status.move(status_x, status_y)
-
-        # --- 累計カウント統計（右下・左半分）---
-        stats_x = RIGHT_X
-        stats_y = status_y + LABEL_STATUS_SIZE_H + MARGIN_Y
+        # --- 統計表示エリア ---
+        stats_x = history_x
+        stats_y = history_y + LABEL_HISTORY_SIZE_H + MARGIN_Y
 
         self.label_stats = QLabel("入力待機中...", self)
         self.label_stats.setFixedSize(LABEL_STATS_SIZE_W, LABEL_STATS_SIZE_H)
         self.label_stats.setStyleSheet(LABEL_STATS_STYLE)
         self.label_stats.move(stats_x, stats_y)
 
-        # --- システム管理エリア（統計の右隣・トグルは従来サイズ）---
-        toggle_w = int(SWITCH_TOGGLE_SIZE_W)
-        toggle_h = int(SWITCH_TOGGLE_SIZE_H)
-        panel_x  = stats_x + LABEL_STATS_SIZE_W + MARGIN_X
-        panel_w  = RIGHT_X + RIGHT_W - panel_x
+        # --- 病害管理エリア ---
+        dam_x = WINDOW_W - LABEL_DAMAGE_SIZE_W - MARGIN_X
+        dam_y = stats_y + LABEL_STATS_SIZE_H + MARGIN_Y
 
-        manage_x = panel_x + (panel_w - LABEL_MANAGEMENT_SIZE_W) // 2
-        manage_y = stats_y
-        toggle_x = panel_x + (panel_w - toggle_w) // 2
-        toggle_y = manage_y + LABEL_MANAGEMENT_SIZE_H + MARGIN_Y
-        toggle_status_x = panel_x + (panel_w - LABEL_TOGGLE_SIZE_W) // 2
-        toggle_status_y = toggle_y + toggle_h + MARGIN_Y
+        self.label_dam = QLabel("判定結果", self)
+        self.label_dam.setFixedSize(LABEL_DAMAGE_SIZE_W, LABEL_DAMAGE_SIZE_H)
+        self.label_dam.setStyleSheet(LABEL_DAMAGE_STYLE)
+        self.label_dam.move(dam_x, dam_y)
+
+        # --- システム管理エリア ---
+        label_management_x = (WINDOW_W * 0.95) - LABEL_MANAGEMENT_SIZE_W - MARGIN_X
+        label_management_y = dam_y + LABEL_DAMAGE_SIZE_H
+        toggle_switch_x    = (WINDOW_W * 0.95) - LABEL_MANAGEMENT_SIZE_W - MARGIN_X
+        toggle_switch_y    = label_management_y + LABEL_MANAGEMENT_SIZE_H
+        toggle_status_x    = toggle_switch_x
+        toggle_status_y    = toggle_switch_y + SWITCH_TOGGLE_SIZE_H + MARGIN_Y
 
         self.label_panel = QLabel("システム管理", self)
         self.label_panel.setFixedSize(LABEL_MANAGEMENT_SIZE_W, LABEL_MANAGEMENT_SIZE_H)
         self.label_panel.setStyleSheet(LABEL_MANAGEMENT_STYLE)
-        self.label_panel.move(manage_x, manage_y)
+        self.label_panel.move(label_management_x, label_management_y)
 
-        self.toggle_switch = ToggleSwitch(self, toggle_w, toggle_h)
-        self.toggle_switch.move(toggle_x, toggle_y)
+        self.toggle_switch = ToggleSwitch(self, SWITCH_TOGGLE_SIZE_W, SWITCH_TOGGLE_SIZE_H)
+        self.toggle_switch.move(toggle_switch_x, toggle_switch_y)
 
         self.label_toggle_status = QLabel("停止中", self)
-        self.label_toggle_status.setFixedSize(LABEL_TOGGLE_SIZE_W, int(LABEL_TOGGLE_SIZE_H))
+        self.label_toggle_status.setFixedSize(LABEL_TOGGLE_SIZE_W, LABEL_TOGGLE_SIZE_H)
         self.label_toggle_status.setStyleSheet(LABEL_TOGGLE_STYLE)
         self.label_toggle_status.move(toggle_status_x, toggle_status_y)
 
-        # --- 左下：設定ボタン＋モード表示パネル ---
-        lb_y      = cam_y_lower + VIEW_CAM_SIZE_H + MARGIN_Y
-        setting_x = MARGIN_X + 600
-        setting_y = lb_y + 65
-
-        pixmap = QPixmap(resource_path("Icon/setting.png"))
-        self.button_setting = ClickableLabel(self)
-        self.button_setting.setFixedSize(ICON_SETTING_SIZE, ICON_SETTING_SIZE)
-        self.button_setting.move(setting_x, setting_y)
-        self.button_setting.setCursor(Qt.PointingHandCursor)
-        resize_smooth_image(pixmap, self.button_setting)
-
-        # モード表示パネル（背景）
-        mode_x = MARGIN_X
-        mode_y = lb_y
-        mode_w = (cam_x_right + VIEW_CAM_SIZE_W) - mode_x
-        mode_h = WINDOW_H - mode_y - MARGIN_Y
-
-        self.label_mode_panel = QLabel("", self)
-        self.label_mode_panel.setFixedSize(mode_w, mode_h)
-        self.label_mode_panel.setStyleSheet(LABEL_MODE_PANEL_STYLE)
-        self.label_mode_panel.move(mode_x, mode_y)
-
-        # パネル内：タイトル＋3行（動作モード / パルス速度 / モデル）
-        pad     = 18
-        cap_x   = mode_x + pad
-        val_x   = mode_x + pad + 180
-        cap_w   = 170
-        val_w   = mode_w - pad * 2 - 180
-        row_h   = 56
-        title_y = mode_y + 12
-        row1_y  = title_y + 46
-        row2_y  = row1_y + row_h
-        row3_y  = row2_y + row_h
-
-        self.label_mode_title = QLabel("モード表示", self)
-        self.label_mode_title.setFixedSize(mode_w - pad * 2, 30)
-        self.label_mode_title.setStyleSheet(LABEL_MODE_TITLE_STYLE)
-        self.label_mode_title.move(cap_x, title_y)
-
-        cap1 = QLabel("動作モード", self)
-        cap1.setStyleSheet(LABEL_MODE_CAPTION_STYLE)
-        cap1.setFixedSize(cap_w, row_h)
-        cap1.move(cap_x, row1_y)
-        cap2 = QLabel("パルス速度", self)
-        cap2.setStyleSheet(LABEL_MODE_CAPTION_STYLE)
-        cap2.setFixedSize(cap_w, row_h)
-        cap2.move(cap_x, row2_y)
-        cap3 = QLabel("モデル", self)
-        cap3.setStyleSheet(LABEL_MODE_CAPTION_STYLE)
-        cap3.setFixedSize(cap_w, row_h)
-        cap3.move(cap_x, row3_y)
+        # --- モード表示ラベル（PCモード / 単体モード）--- cam_under の直下に横表示
+        label_mode_x = cam_x_left
+        label_mode_y = cam_y_lower + VIEW_CAM_SIZE_H + MARGIN_Y
 
         self.label_mode = QLabel("PCモード", self)
-        self.label_mode.setFixedSize(val_w, row_h)
+        self.label_mode.setFixedSize(VIEW_CAM_SIZE_W, int(LABEL_TOGGLE_SIZE_H))
         self.label_mode.setStyleSheet(LABEL_MODE_STYLE_PC)
-        self.label_mode.move(val_x, row1_y)
-
-        self.label_pulse_speed = QLabel("-", self)
-        self.label_pulse_speed.setFixedSize(val_w, row_h)
-        self.label_pulse_speed.setStyleSheet(LABEL_MODE_VALUE_STYLE)
-        self.label_pulse_speed.move(val_x, row2_y)
-
-        self.label_model = QLabel("-", self)
-        self.label_model.setFixedSize(val_w, row_h)
-        self.label_model.setStyleSheet(LABEL_MODE_VALUE_STYLE)
-        self.label_model.move(val_x, row3_y)
-
-        # モードパネル系ウィジェットより前面に出す
-        self.button_setting.raise_()
+        self.label_mode.move(label_mode_x, label_mode_y)
 
         # 単体モード用ブロッキングオーバーレイ（電源ボタンより後に生成することで Z-order を制御）
         self.blocking_overlay = BlockingOverlay(self)

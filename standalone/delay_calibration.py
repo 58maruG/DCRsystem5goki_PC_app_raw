@@ -36,7 +36,7 @@ import cv2
 import numpy as np
 import requests
 
-import module_cameras_5goki as cam_ctr
+import module_cameras_5goki_v2 as cam_ctr
 
 # ==========================================================
 # アーキテクチャ上の役割（main の update_camera_delays と一致させる）
