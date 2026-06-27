@@ -1,6 +1,6 @@
 # -------------------------------------------------
 # calibrate_delay.py
-#   カメラ表示遅延（delay_seconds）の実測キャリブレーションツール。
+#   カメラ表示遅延（delay_seconds）の実測キャリブレーションツール。（Arduino版）
 #
 #   原理:
 #     4カメラを「遅延0（生ストリーム）」で起動し、識別しやすい1個を流す。
@@ -14,15 +14,18 @@
 #       --duration  : 1個あたりの計測ウィンドウ秒数（既定8）
 #       --speed     : 運用スピード(1-10)。回転速度に使用し、main の計算式との比較も表示
 #                     （未指定時は回転速度に既定値5を使用）
-#       --no-rotate : ラズパイの回転を始動しない（手動で果実を流す場合）
+#       --no-rotate : ターンテーブルの回転を始動しない（手動で果実を流す場合）
 #
-#   ※ main_5goki_JP_v2.py と同じ手順でラズパイの回転を自動で始動/停止する
-#     （起動時に /set_speed → /rotate、終了時に /stop）。運用と同じ流速で計測できる。
+#   ※ main_5goki_JP_v3.py（Arduino版）と同じ手順でターンテーブルの回転を自動で始動/停止する
+#     （起動時に 速度設定 → 回転開始、終了時に 停止）。運用と同じ流速で計測できる。
+#     モーター通信は module_motor_serial 経由のArduino USBシリアル。
+#     Arduinoが非常停止（ESTOP）を送ってきた場合は検知し、当該ラウンドを無効化する。
 #
-#   注意:
-#     - delay_seconds は自動では書き込まない（提案のみ）。結果を見て
-#       main_5goki_JP*.py の update_camera_delays に反映すること。
-#     - HSV判定は hsv_config.json を直接読む（module_yolo_csv* の get_target_info と同じ設定）。
+#   出力:
+#     - json/delay_config.json に推奨遅延値を自動保存する。
+#       main_5goki_JP_v3.py の update_camera_delays() がこのファイルを自動読込する。
+#     - calibration_result_*.json に生データ（詳細）を別途保存する。
+#     - HSV判定は hsv_config_{cam}.json を直接読む（カメラ別個別設定）。
 # -------------------------------------------------
 import sys
 import os
@@ -31,12 +34,20 @@ import json
 import argparse
 import statistics
 import datetime
+import threading
 
 import cv2
 import numpy as np
-import requests
 
-import module_cameras_5goki as cam_ctr
+# このスクリプトはプロジェクト直下のモジュールを参照するため、親ディレクトリを import パスに追加
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+_ROOT_DIR = os.path.dirname(_THIS_DIR)
+if _ROOT_DIR not in sys.path:
+    sys.path.insert(0, _ROOT_DIR)
+
+# main_5goki_JP_v3.py（Arduino版）と同じカメラ/モーターモジュールを使う
+import module_cameras_5goki_v2 as cam_ctr
+import module_motor_serial as motor_ctr
 
 # ==========================================================
 # アーキテクチャ上の役割（main の update_camera_delays と一致させる）
@@ -45,14 +56,13 @@ REFERENCE_CAMS = ["cam_top", "cam_outside"]   # 遅延0（基準）
 DELAYED_CAMS = ["cam_under", "cam_inside"]     # 遅延を掛けるカメラ（＝計測対象）
 ALL_CAMS = REFERENCE_CAMS + DELAYED_CAMS
 
-# main_5goki_JP_v2.py と同じラズパイ通信設定（回転を同期させるため）
-RPI_IP_ADDRESS = "192.168.2.1"
-RPI_PORT = 5000
+# Arduinoのシリアルポート。None で自動検出。うまくいかない場合は "COM3" 等を直接指定する
+SERIAL_PORT = None
 # 回転速度の既定（--speed 未指定時。main のデフォルトと揃える）
-DEFAULT_ROTATE_SPEED = 5
+DEFAULT_ROTATE_SPEED = 6
 
 # 中心通過の判定に使う最小ブロブ面積（小さすぎる検出＝ノイズ/画外を無視）
-MIN_AREA = 1500
+MIN_AREA = 10000
 
 # main の update_camera_delays と同じ定数（--speed 指定時の計算式比較に使用）
 SPEED_MAP = {
@@ -60,41 +70,78 @@ SPEED_MAP = {
     5: 0.0006, 6: 0.0005, 7: 0.0004, 8: 0.0003, 9: 0.0002, 10: 0.0001
 }
 RATIO = 1.0
-MICRO_STATUS = 32
+MICRO_STATUS = 16   # TB6600=3200 pulse/rev ÷ 200 step/rev（module_relay と合わせる）
+
+# main_5goki_JP_v3.py が現在採用している固定遅延値（実測との突き合わせ用）
+CURRENT_MAIN_DELAYS = {"cam_under": 1.922, "cam_inside": 2.015}
 
 
 # ==========================================================
-# ラズパイ通信（main_5goki_JP_v2.__async_raspi_request と同等。
-#   コンベア/回転を同期させ、運用と同じ流速で計測するため）
+# Arduinoの非常停止（ESTOP）監視
+#   MotorSerial が受信スレッドから呼ぶコールバックでフラグを立てる。
+#   計測ループ側でこのフラグを見て、当該ラウンドを無効化する。
 # ==========================================================
-def raspi_request(command):
-    """ラズパイへ GET を送る。失敗しても計測を止めないよう例外は握りつぶす。"""
-    url = f"http://{RPI_IP_ADDRESS}:{RPI_PORT}{command}"
-    try:
-        print(f">>>[Sending]: {url}")
-        requests.get(url, timeout=2)
-        return True
-    except Exception as e:
-        print(f"!![Net Error]: {e}")
-        return False
+class EstopWatcher:
+    def __init__(self):
+        self._event = threading.Event()
+
+    # MotorSerial(on_estop=...) から別スレッドで呼ばれる
+    def on_estop(self):
+        self._event.set()
+        print("\n!! 非常停止(ESTOP)を検知しました。現在のラウンドは無効化されます。")
+
+    def on_estop_cleared(self):
+        self._event.clear()
+        print(">> 非常停止が解除されました。")
+
+    def triggered(self):
+        return self._event.is_set()
+
+    def reset(self):
+        self._event.clear()
 
 
 # ==========================================================
 # HSV赤ブロブ検出（module_yolo_csv*.ImageProcessor.get_target_info と同等。
 #   ツールを軽量・独立に保つため最小版を内包。設定変更時は両者を合わせること）
 # ==========================================================
-def load_hsv_ranges():
-    config_path = "hsv_config.json"
-    if os.path.exists(config_path):
-        try:
-            with open(config_path, "r") as f:
-                cfg = json.load(f)
-            return (np.array(cfg["lower1"]), np.array(cfg["upper1"]),
-                    np.array(cfg["lower2"]), np.array(cfg["upper2"]))
-        except Exception as e:
-            print(f"!! hsv_config.json 読み込み失敗（既定値を使用）: {e}")
-    return (np.array([0, 60, 50]), np.array([35, 255, 255]),
-            np.array([160, 60, 50]), np.array([180, 255, 255]))
+_HSV_DEFAULT = (np.array([0, 60, 50]), np.array([35, 255, 255]),
+                np.array([160, 60, 50]), np.array([180, 255, 255]))
+
+
+def _load_single_hsv(path):
+    """JSONファイルから (lower1, upper1, lower2, upper2) を読み込む。失敗時は None。"""
+    try:
+        with open(path, "r") as f:
+            cfg = json.load(f)
+        return (np.array(cfg["lower1"]), np.array(cfg["upper1"]),
+                np.array(cfg["lower2"]), np.array(cfg["upper2"]))
+    except Exception as e:
+        print(f"!! {path} 読み込み失敗: {e}")
+        return None
+
+
+def load_hsv_ranges_per_cam():
+    """カメラ別の hsv_config_{cam_name}.json を読み込み {cam_name: ranges} を返す。
+    カメラ別ファイルが無い場合は hsv_common_config.json、それも無ければ既定値を使う。"""
+    json_dir = os.path.join(_ROOT_DIR, "json")
+    common_path = os.path.join(json_dir, "hsv_common_config.json")
+    common_ranges = _load_single_hsv(common_path) if os.path.exists(common_path) else None
+    if common_ranges is None:
+        common_ranges = _HSV_DEFAULT
+
+    ranges_per_cam = {}
+    for cam in ALL_CAMS:
+        per_cam_path = os.path.join(json_dir, f"hsv_config_{cam}.json")
+        if os.path.exists(per_cam_path):
+            r = _load_single_hsv(per_cam_path)
+            if r is not None:
+                ranges_per_cam[cam] = r
+                print(f"  HSV: {cam} → hsv_config_{cam}.json")
+                continue
+        ranges_per_cam[cam] = common_ranges
+        print(f"  HSV: {cam} → 共通設定（hsv_common_config.json / 既定値）")
+    return ranges_per_cam
 
 
 def find_center_metric(frame, ranges):
@@ -121,9 +168,10 @@ def find_center_metric(frame, ranges):
 # ==========================================================
 # 1回分（1個分）の計測
 # ==========================================================
-def run_round(controllers, ranges, duration):
+def run_round(controllers, ranges_per_cam, duration, estop=None):
     """duration 秒のあいだ各カメラを監視し、カメラごとの「中心通過時刻」を返す。
-    返り値: {cam_name: crossing_monotonic_time or None}"""
+    返り値: {cam_name: crossing_monotonic_time or None}
+    計測中にArduinoの非常停止を検知した場合は例外 RuntimeError を送出する。"""
     # フレーム重複処理を避けるため、最後に処理したフレームの識別子を保持
     last_obj = {c.name: None for c in controllers}
     # 各カメラの最良サンプル: (min_center_dist, crossing_time)
@@ -136,6 +184,10 @@ def run_round(controllers, ranges, duration):
         if now - t_start >= duration:
             break
 
+        # 非常停止を検知したら計測を打ち切る（不正なデータを残さない）
+        if estop is not None and estop.triggered():
+            raise RuntimeError("非常停止(ESTOP)により計測を中断しました")
+
         for c in controllers:
             frame = c.get_current_frame()
             if frame is None:
@@ -145,7 +197,7 @@ def run_round(controllers, ranges, duration):
                 continue
             last_obj[c.name] = frame
 
-            metric = find_center_metric(frame, ranges)
+            metric = find_center_metric(frame, ranges_per_cam[c.name])
             if metric is None:
                 continue
             center_dist, _area = metric
@@ -228,10 +280,25 @@ def print_report(summary, speed):
         recommended[cam] = val
         if val < -0.01:
             print(f"  {cam}: {val:+.3f}s  !! 負値: このカメラは基準より「後」に見えています。")
-            print(f"        現アーキテクチャ(正の遅延のみ)では合わせられません。")
+            print("        現アーキテクチャ(正の遅延のみ)では合わせられません。")
             print(f"        → 基準カメラ側を {cam} に変える等の見直しが必要です。")
         else:
             print(f"  {cam}: {max(0.0, val):.3f} 秒")
+
+    # --- main が現在使っている固定遅延値との比較 ---
+    print("\n--- main_5goki_JP_v3.py の現行固定値との比較 ---")
+    for cam in DELAYED_CAMS:
+        cur = CURRENT_MAIN_DELAYS.get(cam)
+        s = summary[cam]
+        if cur is None:
+            continue
+        if s is None:
+            print(f"  {cam}: 現行 {cur:.3f}s / 実測 未検出")
+            continue
+        meas = max(0.0, s["median"])
+        diff = meas - cur
+        hint = "（ほぼ一致）" if abs(diff) <= 0.05 else "（要更新の可能性）"
+        print(f"  {cam}: 現行 {cur:.3f}s / 実測 {meas:.3f}s  差 {diff:+.3f}s {hint}")
 
     # --- 計算式との比較（--speed 指定時）---
     if speed is not None and speed in SPEED_MAP:
@@ -256,6 +323,22 @@ def print_report(summary, speed):
     return recommended
 
 
+def save_delay_config(recommended):
+    """推奨遅延値を json/delay_config.json に保存する。
+    main_5goki_JP_v3.py の update_camera_delays() がこのファイルを読み込む。"""
+    path = os.path.join(_ROOT_DIR, "json", "delay_config.json")
+    data = {cam: round(max(0.0, v), 4) for cam, v in recommended.items()}
+    data["updated_at"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        print(f"\n遅延設定を保存しました: {path}")
+        for cam, v in recommended.items():
+            print(f"  {cam}: {max(0.0, v):.4f} 秒")
+    except Exception as e:
+        print(f"!! 遅延設定の保存に失敗: {e}")
+
+
 def save_result(summary, recommended, rounds_times, speed):
     out = {
         "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
@@ -271,24 +354,25 @@ def save_result(summary, recommended, rounds_times, speed):
     try:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(out, f, ensure_ascii=False, indent=2)
-        print(f"\n結果を保存しました: {path}")
+        print(f"詳細ログを保存しました: {path}")
     except Exception as e:
-        print(f"!! 結果保存に失敗: {e}")
+        print(f"!! 詳細ログの保存に失敗: {e}")
 
 
 # ==========================================================
 # メイン
 # ==========================================================
 def main():
-    parser = argparse.ArgumentParser(description="カメラ遅延の実測キャリブレーション")
+    parser = argparse.ArgumentParser(description="カメラ遅延の実測キャリブレーション（Arduino版）")
     parser.add_argument("--rounds", type=int, default=5, help="計測する個数（既定5）")
     parser.add_argument("--duration", type=float, default=8.0, help="1個あたりの計測秒数（既定8）")
     parser.add_argument("--speed", type=int, default=None, help="運用スピード1-10（計算式比較用・任意）")
     parser.add_argument("--no-rotate", action="store_true",
-                        help="ラズパイの回転を始動しない（手動で果実を流す場合）")
+                        help="ターンテーブルの回転を始動しない（手動で果実を流す場合）")
     args = parser.parse_args()
 
-    ranges = load_hsv_ranges()
+    print("HSV設定を読み込み中...")
+    ranges_per_cam = load_hsv_ranges_per_cam()
 
     manager = cam_ctr.CameraManager()
     print("カメラを初期化中...")
@@ -309,26 +393,42 @@ def main():
     manager.start_all_get_frame()
     time.sleep(1.0)  # ストリーム安定待ち
 
-    # --- ラズパイの回転を main と同じ手順で始動（速度設定 → 回転開始）---
+    # --- ターンテーブルの回転を main と同じ手順で始動（速度設定 → 回転開始）---
+    #   Arduinoの非常停止通知を受け取れるよう EstopWatcher を渡す
+    estop = EstopWatcher()
+    motor = None
     rotating = False
     if not args.no_rotate:
         rotate_speed = args.speed if args.speed is not None else DEFAULT_ROTATE_SPEED
-        print(f"\nラズパイの回転を始動します（speed={rotate_speed}）...")
-        raspi_request(f"/set_speed/{rotate_speed}")
-        rotating = raspi_request("/rotate")
+        print(f"\nターンテーブルの回転を始動します（speed={rotate_speed}）...")
+        motor = motor_ctr.MotorSerial(
+            port=SERIAL_PORT,
+            on_estop=estop.on_estop,
+            on_estop_cleared=estop.on_estop_cleared,
+        )
+        if motor.init():
+            motor.set_speed(rotate_speed)
+            rotating = motor.rotate()
         if rotating:
             print("回転を開始しました。運用と同じ流速で果実を流してください。")
         else:
-            print("!! 回転の始動に失敗しました。ラズパイ接続を確認するか、手動で流してください。")
+            print("!! 回転の始動に失敗しました。Arduino接続を確認するか、手動で流してください。")
     else:
-        print("\n--no-rotate 指定: ラズパイの回転は始動しません（手動投入）。")
+        print("\n--no-rotate 指定: ターンテーブルの回転は始動しません（手動投入）。")
 
     rounds_times = []
     try:
         for r in range(1, args.rounds + 1):
             input(f"\n[ラウンド {r}/{args.rounds}] 識別しやすい1個を投入できたら Enter で計測開始 → ")
+            if estop.triggered():
+                print("!! 非常停止中です。解除してから計測してください。このラウンドはスキップします。")
+                continue
             print(f"計測開始（{args.duration:.0f}秒）。果実を中央付近を通過させてください。")
-            rt = run_round(controllers, ranges, args.duration)
+            try:
+                rt = run_round(controllers, ranges_per_cam, args.duration, estop=estop)
+            except RuntimeError as e:
+                print(f"!! {e}。このラウンドは無効化しました。")
+                continue
             rel = {}
             base = min([t for t in rt.values() if t is not None], default=None)
             for cam in ALL_CAMS:
@@ -344,8 +444,10 @@ def main():
     finally:
         # main と同じく、終了時は必ず回転を停止する
         if rotating:
-            print("ラズパイの回転を停止します...")
-            raspi_request("/stop")
+            print("ターンテーブルの回転を停止します...")
+            motor.stop()
+        if motor is not None:
+            motor.close()
         manager.stop_all_get_frame()
 
     if not rounds_times:
@@ -354,8 +456,9 @@ def main():
 
     summary = summarize(rounds_times)
     recommended = print_report(summary, args.speed)
+    save_delay_config(recommended)
     save_result(summary, recommended, rounds_times, args.speed)
-    print("\n完了。推奨値を main の update_camera_delays に反映してください。")
+    print("\n完了。delay_config.json を自動保存しました。次回の main 起動時から自動反映されます。")
     return 0
 
 

@@ -361,7 +361,7 @@ class YoloDetector:
 
         # カメラごとに独立した ByteTracker（カメラ間で追跡状態が混ざらないよう分離）
         tracker_cfg  = IterableSimpleNamespace(**YAML.load(check_yaml("bytetrack.yaml")))
-        self.trackers = {cam: BYTETracker(tracker_cfg, frame_rate=int(FPS)) for cam in CAM_NAMES}
+        self.trackers = {cam: BYTETracker(tracker_cfg) for cam in CAM_NAMES}
 
         self.EMPTY_TIMEOUT_SEC = EMPTY_TIMEOUT_SEC
         self.MIN_VISIBLE_SEC   = MIN_VISIBLE_SEC
