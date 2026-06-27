@@ -1,0 +1,33 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.claude/
+
+# Virtual environments
+.venv
+# requirements files
+
+# Folder
+benio_analysis/
+evaluated_images/
+Trained_Models/
+training_images/
+unused/
+CC_debug/
+
+# config files
+json/hsv_config.json
+
+cam_pfs/cam_inside.pfs
+cam_pfs/cam_outside.pfs
+cam_pfs/cam_top.pfs
+cam_pfs/cam_under.pfs
+
+# Python files
+standalone/hsv_test.py
+standalone/hsv_calibration_static.py
+module_yolo_csv4_backup.py

@@ -1,0 +1,16 @@
+[project]
+name = "dcrsystem5goki-pc-app-raw"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "hidapi>=0.15.0",
+    "numpy>=2.5.0",
+    "opencv-python>=4.13.0.92",
+    "pypylon>=26.5.0",
+    "pyserial>=3.5",
+    "pyside6>=6.11.1",
+    "serial>=0.0.97",
+    "ultralytics>=8.4.80",
+]
