@@ -479,10 +479,15 @@ class MainWindow(module_gui_JP_v3.MainWindowUI):
         )
 
     # --- ヘルスログ更新（≈1Hz）---
-    #   psutil(CPU/メモリ/ディスク) と GPU(nvml,任意) を取得し、
-    #   アプリ内部値(フレーム滞留・Arduino死活)と合わせて1行残す。
-    #   取得失敗してもアプリは止めない。GPU等が無い列は空欄になる。
+    #   QTimer コールバック（GUI スレッド）から即座に返し、重いI/O処理はバックグラウンドへ逃がす。
+    #   cpu_temp_c() が localhost:8085 への HTTP 接続(timeout=0.5s)を試みるため、
+    #   LHM 未起動時に GUI スレッドで直接呼ぶと 500ms のフリーズが毎秒発生する。
     def update_health(self):
+        self.run_in_background(self._do_health_check)
+
+    def _do_health_check(self):
+        # ※ここはバックグラウンドスレッド。Qtウィジェットには触れないこと。
+        #   Telemetry.update/snapshot はロック済み、dcr.health は put_nowait のため安全。
         try:
             s = telemetry_sources.sys_stats()
             g = telemetry_sources.gpu_stats()           # GPU温度/使用率/クロック + VRAM/電力
