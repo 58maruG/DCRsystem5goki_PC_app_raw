@@ -48,6 +48,7 @@ if _ROOT_DIR not in sys.path:
 # main_5goki_JP_v3.py（Arduino版）と同じカメラ/モーターモジュールを使う
 import module_cameras_5goki_v2 as cam_ctr
 import module_motor_serial as motor_ctr
+import module_relay as r_ctr
 
 # ==========================================================
 # アーキテクチャ上の役割（main の update_camera_delays と一致させる）
@@ -64,13 +65,9 @@ DEFAULT_ROTATE_SPEED = 6
 # 中心通過の判定に使う最小ブロブ面積（小さすぎる検出＝ノイズ/画外を無視）
 MIN_AREA = 10000
 
-# main の update_camera_delays と同じ定数（--speed 指定時の計算式比較に使用）
-SPEED_MAP = {
-    1: 0.0010, 2: 0.0009, 3: 0.0008, 4: 0.0007,
-    5: 0.0006, 6: 0.0005, 7: 0.0004, 8: 0.0003, 9: 0.0002, 10: 0.0001
-}
+# SPEED_MAP / PULSE_PER_ROTATION は module_relay(r_ctr) のものをそのまま使う（重複定義による齟齬防止）。
+# RATIO: 計算式(module_relay と同じ式)を実測に合わせるための補正係数。1.0=無補正。
 RATIO = 1.0
-MICRO_STATUS = 16   # TB6600=3200 pulse/rev ÷ 200 step/rev（module_relay と合わせる）
 
 # main_5goki_JP_v3.py が現在採用している固定遅延値（実測との突き合わせ用）
 CURRENT_MAIN_DELAYS = {"cam_under": 1.922, "cam_inside": 2.015}
@@ -301,11 +298,11 @@ def print_report(summary, speed):
         print(f"  {cam}: 現行 {cur:.3f}s / 実測 {meas:.3f}s  差 {diff:+.3f}s {hint}")
 
     # --- 計算式との比較（--speed 指定時）---
-    if speed is not None and speed in SPEED_MAP:
-        delay = SPEED_MAP[speed]
+    # module_relay と同じ式（t_one_pulse × PULSE_PER_ROTATION × ギア比2）に RATIO 補正を掛ける。
+    if speed is not None and speed in r_ctr.SPEED_MAP:
+        delay = r_ctr.SPEED_MAP[speed]
         t_one_pulse = delay * 2
-        step_one_rotation = RATIO * (360 / 1.8) * MICRO_STATUS
-        sec = t_one_pulse * step_one_rotation * 2
+        sec = t_one_pulse * (RATIO * r_ctr.PULSE_PER_ROTATION) * 2
         formula_delay = sec * (60 / 360)
         print(f"\n--- 現行計算式との比較（speed={speed}）---")
         print(f"  計算式が出す遅延: {formula_delay:.3f} 秒（cam_under/cam_inside 共通）")
@@ -315,7 +312,7 @@ def print_report(summary, speed):
             suggested_ratio = RATIO * meas / formula_delay
             print(f"  実測（遅延対象の中央値）: {meas:.3f} 秒")
             print(f"  → 計算式を実測に合わせる補正係数 RATIO 約 {suggested_ratio:.3f}")
-            print(f"     （現在 RATIO={RATIO}。main の RATIO をこの値にすると計算式が実測へ近づく）")
+            print(f"     （現在 RATIO={RATIO}。このファイル冒頭の RATIO をこの値にすると計算式が実測へ近づく）")
         if len(valid) == 2 and abs(recommended[DELAYED_CAMS[0]] - recommended[DELAYED_CAMS[1]]) > 0.05:
             print("  ※ 2台の遅延差が大きいため、共通値1つの計算式では不十分。")
             print("     カメラ別に delay_seconds を個別設定することを推奨。")

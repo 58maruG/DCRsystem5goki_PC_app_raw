@@ -22,7 +22,7 @@ YDCI_OPEN_NORMAL    = 0   # YdciOpen 通常オープン
 # リレー動作定数
 # ================================================
 RELAY_OPEN_TIME    = 0.3    # リレーの開閉時間（秒）
-PULSE_PER_ROTATION = 6400    # TB6600のパルス数（1回転あたり）
+PULSE_PER_ROTATION = 6400    # DR42Aのパルス数（1回転あたり）
 
 # 検知位置から各弁までのターンテーブル回転角度[度]
 REMOVE_ANGLE    = 60    # 被害果除去弁

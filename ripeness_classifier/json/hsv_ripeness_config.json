@@ -1,0 +1,76 @@
+{
+    "fruit": {
+        "lower1": [
+            0,
+            1,
+            0
+        ],
+        "upper1": [
+            35,
+            255,
+            255
+        ],
+        "lower2": [
+            160,
+            1,
+            0
+        ],
+        "upper2": [
+            180,
+            255,
+            255
+        ]
+    },
+    "unripe": {
+        "lower1": [
+            11,
+            50,
+            50
+        ],
+        "upper1": [
+            35,
+            255,
+            255
+        ],
+        "lower2": [
+            11,
+            50,
+            50
+        ],
+        "upper2": [
+            35,
+            255,
+            255
+        ]
+    },
+    "overripe": {
+        "lower1": [
+            0,
+            10,
+            30
+        ],
+        "upper1": [
+            9,
+            255,
+            160
+        ],
+        "lower2": [
+            170,
+            10,
+            30
+        ],
+        "upper2": [
+            180,
+            255,
+            160
+        ]
+    },
+    "occ_unripe_confirm": 50,
+    "occ_overripe_confirm": 100,
+    "min_area": 550,
+    "stem_open": 2,
+    "reflect_sat_lo": 0,
+    "reflect_sat_hi": 120,
+    "reflect_v_lo": 160,
+    "reflect_v_hi": 255
+}
